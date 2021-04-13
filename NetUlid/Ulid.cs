@@ -24,6 +24,7 @@ namespace NetUlid
     using System;
     using System.Buffers.Binary;
     using System.ComponentModel;
+    using System.Linq;
     using System.Numerics;
     using System.Runtime.CompilerServices;
     using System.Security.Cryptography;
@@ -84,7 +85,25 @@ namespace NetUlid
                 throw new ArgumentException("The value must be 10 bytes exactly.", nameof(randomness));
             }
 
-            throw new NotImplementedException();
+            fixed (void* d = this.data)
+            {
+                fixed (void* s = randomness.ToArray().Reverse().Concat(BitConverter.GetBytes(timestamp)).ToArray())
+                {
+                    Unsafe.CopyBlockUnaligned(d, s, DataSize);
+                }
+            }
+
+            fixed (void* nd = Null.data)
+            {
+                fixed (void* d = this.data)
+                {
+                    fixed (void* s = this.ToByteArray().Reverse().ToArray())
+                    {
+                        Unsafe.CopyBlockUnaligned(d, s, DataSize);
+                        Unsafe.CopyBlockUnaligned(nd, s, DataSize);
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -175,7 +194,27 @@ namespace NetUlid
                 throw new ArgumentOutOfRangeException(nameof(timestamp));
             }
 
-            throw new NotImplementedException();
+            var oldTimestamp = Null.ToByteArray().Take(6).Reverse().ToList();
+            oldTimestamp.Insert(6, 0);
+            oldTimestamp.Insert(7, 0);
+            var oldRandomness = Null.ToByteArray().Skip(6).ToArray();
+            if (oldTimestamp.SequenceEqual(BitConverter.GetBytes(timestamp)))
+            {
+                var newLast = Convert.ToInt32(oldRandomness[9]) + 1;
+                byte[] bytes = BitConverter.GetBytes(newLast);
+                oldRandomness[9] = bytes.First();
+                return new Ulid(timestamp, oldRandomness);
+            }
+            else
+            {
+                byte[] randomness = new byte[10];
+                using (RNGCryptoServiceProvider RNG = new RNGCryptoServiceProvider())
+                {
+                    RNG.GetBytes(randomness);
+                }
+
+                return new Ulid(timestamp, randomness);
+            }
         }
 
         /// <summary>
@@ -198,7 +237,57 @@ namespace NetUlid
                 throw new FormatException();
             }
 
-            throw new NotImplementedException();
+            Ulid ulid = default;
+            s = s.ToUpperInvariant();
+
+            int[] index = new int[26];
+
+            bool doIt = true;
+            for (int i = 0; i < 26; ++i)
+            {
+                char c = s[i];
+                bool found = false;
+
+                for (int v = 0; v < Base32.Length; ++v)
+                {
+                    if (Base32[v] == c)
+                    {
+                        index[i] = v;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    doIt = false;
+                    break;
+                }
+            }
+
+            if (doIt)
+            {
+                var data = ulid.ToByteArray();
+                data[0] = (byte)(index[0] << 5 | index[1]);
+                data[1] = (byte)(index[2] << 3 | index[3] >> 2);
+                data[2] = (byte)(index[3] << 6 | index[4] << 1 | index[5] >> 4);
+                data[3] = (byte)(index[5] << 4 | index[6] >> 1);
+                data[4] = (byte)(index[6] << 7 | index[7] << 2 | index[8] >> 3);
+                data[5] = (byte)(index[8] << 5 | index[9]);
+                data[6] = (byte)(index[10] << 3 | index[11] >> 2);
+                data[7] = (byte)(index[11] << 6 | index[12] << 1 | index[13] >> 4);
+                data[8] = (byte)(index[13] << 4 | index[14] >> 1);
+                data[9] = (byte)(index[14] << 7 | index[15] << 2 | index[16] >> 3);
+                data[10] = (byte)(index[16] << 5 | index[17]);
+                data[11] = (byte)(index[18] << 3 | index[19] >> 2);
+                data[12] = (byte)(index[19] << 6 | index[20] << 1 | index[21] >> 4);
+                data[13] = (byte)(index[21] << 4 | index[22] >> 1);
+                data[14] = (byte)(index[22] << 7 | index[23] << 2 | index[24] >> 3);
+                data[15] = (byte)(index[24] << 5 | index[25]);
+                return new Ulid(data);
+            }
+
+            return ulid;
         }
 
         public int CompareTo(Ulid other)
