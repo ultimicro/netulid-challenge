@@ -27,6 +27,7 @@ namespace NetUlid
     using System.Numerics;
     using System.Runtime.CompilerServices;
     using System.Security.Cryptography;
+    using System.Text;
 
     /// <summary>
     /// Represents a Universally Unique Lexicographically Sortable Identifier (ULID).
@@ -55,6 +56,8 @@ namespace NetUlid
         private const string Base32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
         private const int DataSize = 16;
         private fixed byte data[DataSize];
+        private static long LatestTimeStamp = 0;
+        private static long LatestRandomness = 0;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Ulid"/> structure by using the specified timestamp and randomness.
@@ -83,8 +86,21 @@ namespace NetUlid
             {
                 throw new ArgumentException("The value must be 10 bytes exactly.", nameof(randomness));
             }
+            byte[] timestampBytes = BitConverter.GetBytes(timestamp);
+            Array.Reverse(timestampBytes);
+            timestampBytes = new ArraySegment<byte>(timestampBytes, 2, 6).ToArray();
 
-            throw new NotImplementedException();
+            byte[] finalResult = new byte[timestampBytes.Length + randomness.Length];
+            timestampBytes.CopyTo(finalResult, 0);
+            randomness.ToArray().CopyTo(finalResult, timestampBytes.Length);
+
+            fixed (void* d = this.data)
+            {
+                fixed (void* s = finalResult)
+                {
+                    Unsafe.CopyBlockUnaligned(d, s, DataSize);
+                }
+            }
         }
 
         /// <summary>
@@ -175,7 +191,37 @@ namespace NetUlid
                 throw new ArgumentOutOfRangeException(nameof(timestamp));
             }
 
-            throw new NotImplementedException();
+            //https://github.com/ulid/spec#monotonicity
+            //When generating a ULID within the same millisecond, we can provide some guarantees regarding sort order.
+            //Namely, if the same millisecond is detected, the random component is incremented by 1 bit in the least
+            //significant bit position (with carrying)
+
+            if (timestamp == LatestTimeStamp)
+            {
+                LatestRandomness++;
+            }
+            else
+            {
+                LatestTimeStamp = timestamp;
+                LatestRandomness = RandomLong(0, long.MaxValue);
+            }
+            
+            byte[] timestampBytes = BitConverter.GetBytes(LatestTimeStamp);
+            Array.Reverse(timestampBytes);
+            timestampBytes = new ArraySegment<byte>(timestampBytes, 2, 6).ToArray();
+
+            //find randomness
+            byte[] randomness = BitConverter.GetBytes(LatestRandomness);
+            Array.Reverse(randomness);
+            byte[] finalRandomness = new byte[10];
+            randomness.CopyTo(finalRandomness, 2);
+
+            byte[] finalId = new byte[finalRandomness.Length + timestampBytes.Length];
+
+            timestampBytes.CopyTo(finalId, 0);
+            finalRandomness.CopyTo(finalId, timestampBytes.Length);
+
+            return new Ulid(finalId);
         }
 
         /// <summary>
@@ -198,7 +244,22 @@ namespace NetUlid
                 throw new FormatException();
             }
 
-            throw new NotImplementedException();
+            //https://github.com/ulid/spec#encoding
+            //Encoding
+            //Crockford's Base32 is used as shown. This alphabet excludes the letters I, L, O, and U to avoid confusion and abuse.
+            //https://github.com/atifaziz/Crockbase32
+
+            string timeStamp = s.Substring(0, 10).PadLeft(16, '0');//Pad it to be 2 byte
+            string randomness = s.Substring(10, 16);
+
+            byte[] decoded = Crockbase32.Decode(timeStamp);
+            byte[] timeStampBytes = new ArraySegment<byte>(decoded, 4, 6).ToArray();
+            byte[] randomnessBytes = Crockbase32.Decode(randomness);
+            byte[] finalBytes = new byte[timeStampBytes.Length  + randomnessBytes.Length];
+
+            timeStampBytes.CopyTo(finalBytes, 0);
+            randomnessBytes.CopyTo(finalBytes, timeStampBytes.Length );
+            return new Ulid(finalBytes);
         }
 
         public int CompareTo(Ulid other)
@@ -349,6 +410,34 @@ namespace NetUlid
             result[25] = Base32[this.data[15] & 0x1F];
 
             return new string(result);
+        }
+
+        /// <summary>
+        /// Random number as long
+        /// </summary>
+        //https://stackoverflow.com/questions/6651554/random-number-in-long-range-is-this-the-way
+        public static long RandomLong(long min, long max)
+        {
+            if (max <= min)
+                throw new ArgumentOutOfRangeException("max", "max must be > min!");
+
+            //Working with ulong so that modulo works correctly with values > long.MaxValue
+            ulong uRange = (ulong)(max - min);
+
+            //Prevent a modolo bias; see https://stackoverflow.com/a/10984975/238419
+            //for more information.
+            //In the worst case, the expected number of calls is 2 (though usually it's
+            //much closer to 1) so this loop doesn't really hurt performance at all.
+            ulong ulongRand;
+            Random random = new Random();
+            do
+            {
+                byte[] buf = new byte[8];
+                random.NextBytes(buf);
+                ulongRand = (ulong)BitConverter.ToInt64(buf, 0);
+            } while (ulongRand > ulong.MaxValue - ((ulong.MaxValue % uRange) + 1) % uRange);
+
+            return (long)(ulongRand % uRange) + min;
         }
     }
 }
